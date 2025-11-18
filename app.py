@@ -39,32 +39,36 @@ def create_agent():
     root_agent = Agent(
         name="uscis_assistant",
         model=Gemini(
-            model="gemini-2.5-flash",
+            model="gemini-2.5-flash", # Using the flash-lite model
             retry_options=retry_config
         ),
         description="An agent that answers immigration questions based *only* on www.uscis.gov.",
+        
+        # --- HERE IS THE FIX ---
         instruction=(
-            "You are a helpful assistant for US immigration questions. "
-            "You MUST use the `Google Search` tool to answer ALL user questions. "
-            "After you get the search results, you MUST filter them. "
-            "You MUST ONLY use information from search results where the URL **starts with** `https://www.uscis.gov`. "
-            "You MUST IGNORE any and all search results from other websites like boundless.com, citizenpath.com, etc. "
-            "Base your answer *strictly* and *only* on the snippets from the `https.www.uscis.gov` results. "
-            "Do not use any outside knowledge. "
-            "After providing the answer, you MUST cite all the sources you used. "
-            "You MUST list the URLs of the sources you used (which MUST be from `https://www.uscis.gov`) in a ranked list, ordered by relevance. "
-            "You MUST format the citations *exactly* like this: "
+            "You are a specialized assistant. Your **only** function is to answer questions based **only** on information from the `www.uscis.gov` website. "
+            "**Do not, under any circumstances, answer any question from your own internal knowledge.** "
+            
+            "**Your process for EVERY prompt MUST be:**"
+            "1.  Use the `Google Search` tool to find relevant information. "
+            "2.  Analyze the search results. "
+            "3.  You MUST filter out and **completely ignore** any result that is **not** from `https://www.uscis.gov`. "
+            "4.  If, after filtering, there are **no relevant results from `https://www.uscis.gov`**, OR if the user's prompt is off-topic (like weather, geography, or travel to other countries), you **MUST** respond with the exact phrase: "
+            "'Details not found in 'www.uscis.gov', check other sources!'"
+            
+            "**If, and only if, you find valid results from `https://www.uscis.gov`:**"
+            "1.  Base your answer *strictly* and *only* on the snippets from those `https://www.uscis.gov` results. "
+            "2.  After the answer, you MUST cite your sources in this exact format: "
             "\\nSources:"
             "\\n1. <full URL of the first source>"
             "\\n2. <full URL of the second source>"
-            "If the search results are empty, or if there are no search results from `https://www.uscis.gov`, or if the `www.uscis.gov` snippets do not contain a clear answer, "
-            "you MUST respond with the exact phrase: "
-            "'Details not found in website 'www.uscis.gov', check other sources!'"
         ),
+        # --- END FIX ---
+        
         tools=[google_search],
     )
     return root_agent
-
+    
 # --- 3. Define Async Helper Function ---
 async def get_agent_response_async(prompt: str):
     """
