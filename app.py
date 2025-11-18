@@ -39,7 +39,7 @@ def create_agent():
     root_agent = Agent(
         name="uscis_assistant",
         model=Gemini(
-            model="gemini-2.5-flash-lite",
+            model="gemini-2.5-flash",
             retry_options=retry_config
         ),
         description="An agent that answers immigration questions based *only* on www.uscis.gov.",
