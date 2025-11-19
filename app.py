@@ -12,7 +12,6 @@ from google.adk.tools import google_search
 from google.genai import types
 
 # --- NEST_ASYNCIO PATCH ---
-# This patches asyncio to allow nested event loops.
 import nest_asyncio
 nest_asyncio.apply()
 
@@ -39,54 +38,54 @@ def create_agent():
     root_agent = Agent(
         name="uscis_assistant",
         model=Gemini(
-            model="gemini-2.5-flash", # Using the flash-lite model
+            model="gemini-2.5-flash-lite", 
             retry_options=retry_config
         ),
         description="An agent that answers immigration questions based *only* on www.uscis.gov.",
-        
-        # --- HERE IS THE FIX ---
         instruction=(
-            "You are a specialized assistant. Your **only** function is to answer questions based **only** on information from the `www.uscis.gov` website. "
-            "**Do not, under any circumstances, answer any question from your own internal knowledge.** "
-            
-            "**Your process for EVERY prompt MUST be:**"
-            "1.  Use the `Google Search` tool to find relevant information. "
-            "2.  Analyze the search results. "
-            "3.  You MUST filter out and **completely ignore** any result that is **not** from `https://www.uscis.gov`. "
-            "4.  If, after filtering, there are **no relevant results from `https://www.uscis.gov`**, OR if the user's prompt is off-topic (like weather, geography, or travel to other countries), you **MUST** respond with the exact phrase: "
-            "'Details not found in 'www.uscis.gov', check other sources!'"
-            
-            "**If, and only if, you find valid results from `https://www.uscis.gov`:**"
-            "1.  Base your answer *strictly* and *only* on the snippets from those `https://www.uscis.gov` results. "
-            "2.  After the answer, you MUST cite your sources in this exact format: "
+            "You are a helpful assistant for US immigration questions. "
+            "You MUST use the `Google Search` tool to answer ALL user questions. "
+            "The user's query will automatically include a 'site:' restriction. "
+            "Do not remove this restriction. "
+            "Base your answer *strictly* and *only* on the snippets provided by the search tool. "
+            "Do not use any outside knowledge. "
+            "After providing the answer, you MUST cite all the sources you used. "
+            "You MUST format the citations *exactly* like this: "
             "\\nSources:"
             "\\n1. <full URL of the first source>"
             "\\n2. <full URL of the second source>"
+            "If the search results are empty, or if the snippets do not contain a clear answer, "
+            "you MUST respond with the exact phrase: "
+            "'Details not found in website 'www.uscis.gov', check other sources!'"
         ),
-        # --- END FIX ---
-        
         tools=[google_search],
     )
     return root_agent
-    
+
 # --- 3. Define Async Helper Function (With Resource Cleanup) ---
 async def get_agent_response_async(prompt: str):
     """
     Creates a *fresh* agent and runner (stateless), runs the prompt,
-    and ensures the client connection is closed to prevent warnings.
+    and ensures the client connection is closed.
     """
     print("✅ Creating new *stateless* Agent and Runner in async context.")
     
     agent = None
     try:
-        # 1. Create a fresh agent *inside* this loop
+        # 1. Create a fresh agent
         agent = create_agent()
 
-        # 2. Create a fresh runner *inside* this loop
+        # 2. Create a fresh runner
         runner = InMemoryRunner(agent=agent)
         
-        # 3. Run the *new* prompt
-        result_events = await runner.run_debug(prompt)
+        # --- THE FIX: SEARCH QUERY INJECTION ---
+        # We append the site restriction here. The model sees:
+        # "What is a green card? site:www.uscis.gov"
+        # This forces Google Search to ONLY return USCIS links.
+        restricted_prompt = f"{prompt} site:www.uscis.gov"
+        
+        # 3. Run the *restricted* prompt
+        result_events = await runner.run_debug(restricted_prompt)
         
         # 4. Parse the response
         try:
@@ -104,12 +103,10 @@ async def get_agent_response_async(prompt: str):
             return f"An error occurred while parsing the agent's response: {e}"
 
     finally:
-        # --- FIX: Explicitly close the client connection ---
-        # This prevents the "Task was destroyed but it is pending" warnings
-        # by ensuring the AsyncClient is properly closed before we exit.
+        # Explicitly close the client connection
         if agent and hasattr(agent.model, "client"):
             await agent.model.client.close()
-            
+
 # --- 4. Define Synchronous Wrapper ---
 def get_agent_response(prompt: str):
     """
@@ -142,7 +139,6 @@ if prompt := st.chat_input("What is the I-90 form for?"):
     with st.chat_message("assistant"):
         with st.spinner("Searching www.uscis.gov..."):
             
-            # Call with *only* the prompt
             response = get_agent_response(prompt)
             st.markdown(response)
     
