@@ -3,12 +3,12 @@
 import os
 import streamlit as st
 import asyncio
+import requests  # New import for our custom tool
 
 # --- ADK Imports ---
 from google.adk.agents import Agent
 from google.adk.models.google_llm import Gemini
 from google.adk.runners import InMemoryRunner
-from google.adk.tools import google_search
 from google.genai import types
 
 # --- NEST_ASYNCIO PATCH ---
@@ -24,7 +24,49 @@ except (KeyError, FileNotFoundError):
     st.info("Please add your API keys to the .streamlit/secrets.toml file.")
     st.stop()
 
-# --- 2. Define the Agent (No Caching) ---
+# --- 2. Define Custom Tool (True Tool Grounding) ---
+# This function REPLACES the generic google_search.
+# It forces the restriction in CODE, so the agent cannot bypass it.
+def search_uscis(query: str) -> str:
+    """
+    Searches the official USCIS website (www.uscis.gov) for information.
+    """
+    # FORCE the site restriction. The agent has no choice.
+    if "site:www.uscis.gov" not in query:
+        query = f"{query} site:www.uscis.gov"
+    
+    # Use the Google Custom Search API directly
+    try:
+        api_key = os.environ["GOOGLE_API_KEY"]
+        cse_id = os.environ["GOOGLE_CSE_ID"]
+        url = "https://www.googleapis.com/customsearch/v1"
+        params = {
+            "key": api_key,
+            "cx": cse_id,
+            "q": query
+        }
+        
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        items = data.get("items", [])
+        if not items:
+            return "No results found on www.uscis.gov."
+            
+        # Format the results for the agent
+        results_text = ""
+        for item in items[:5]:  # Limit to top 5 results
+            results_text += f"Title: {item.get('title')}\n"
+            results_text += f"Link: {item.get('link')}\n"
+            results_text += f"Snippet: {item.get('snippet')}\n\n"
+            
+        return results_text
+
+    except Exception as e:
+        return f"Error searching USCIS: {str(e)}"
+
+# --- 3. Define the Agent ---
 def create_agent():
     print("✅ Creating new agent definition...")
     
@@ -42,94 +84,79 @@ def create_agent():
             retry_options=retry_config
         ),
         description="An agent that answers immigration questions based *only* on www.uscis.gov.",
-        # --- FIX: FEW-SHOT PROMPTING FOR TOOL GROUNDING ---
+        # Simplified instructions because the TOOL now handles the filtering
         instruction=(
             "You are a helpful assistant for US immigration questions. "
-            "You MUST use the `Google Search` tool to answer ALL user questions. "
+            "You MUST use the `search_uscis` tool to answer ALL user questions. "
             
-            "**CRITICAL TOOL USAGE RULE:**"
-            "When calling `Google Search`, you **MUST** include the `site:www.uscis.gov` filter inside the query argument. "
-            "Do not rely on the user's prompt to have it. You must ensure it is there."
-            
-            "**EXAMPLES OF CORRECT TOOL USAGE:**"
-            "User: 'Green card'"
-            "✅ CORRECT Call: `Google Search(query='Green card site:www.uscis.gov')`"
-            "❌ INCORRECT Call: `Google Search(query='Green card')`"
-            
-            "User: 'H-1B cap'"
-            "✅ CORRECT Call: `Google Search(query='H-1B cap site:www.uscis.gov')`"
-            
-            "Base your answer *strictly* and *only* on the snippets provided by the search tool. "
+            "**Base your answer *strictly* and *only* on the search results provided by the tool.** "
             "Do not use any outside knowledge. "
+            
             "After providing the answer, you MUST cite all the sources you used. "
             "You MUST format the citations *exactly* like this: "
             "\\nSources:"
             "\\n1. <full URL of the first source>"
             "\\n2. <full URL of the second source>"
             
-            "If the search results are empty, or if the snippets do not contain a clear answer, "
+            "If the tool returns 'No results found', or if the snippets do not contain a clear answer, "
             "you MUST respond with the exact phrase: "
             "'Details not found in website 'www.uscis.gov', check other sources!'"
         ),
-        tools=[google_search],
+        # We pass our CUSTOM tool here instead of the generic one
+        tools=[search_uscis],
     )
     return root_agent
 
-# --- 3. Define Async Helper Function (With Resource Cleanup) ---
+# --- 4. Define Async Helper Function ---
 async def get_agent_response_async(prompt: str):
     """
     Creates a *fresh* agent and runner (stateless), runs the prompt,
-    and ensures the client connection is closed.
+    and ensures cleanup.
     """
     print("✅ Creating new *stateless* Agent and Runner in async context.")
     
     agent = None
     try:
-        # 1. Create a fresh agent
         agent = create_agent()
-
-        # 2. Create a fresh runner
         runner = InMemoryRunner(agent=agent)
         
-        # --- SEARCH QUERY INJECTION (Keep this as a safety net) ---
-        restricted_prompt = f"{prompt} site:www.uscis.gov"
+        # We don't need to inject 'site:...' here anymore, the tool does it.
+        result_events = await runner.run_debug(prompt)
         
-        # 3. Run the *restricted* prompt
-        result_events = await runner.run_debug(restricted_prompt)
-        
-        # 4. Parse the response
+        # Parse the response
         try:
-            last_event = result_events[-1]
-            content = last_event.content
+            # Find the last event that is from the model
+            for event in reversed(result_events):
+                # We check if it has content (some events might be tool calls)
+                if hasattr(event, 'content') and event.content and event.content.parts:
+                    text = event.content.parts[0].text
+                    # Basic check to ensure it's not a tool call request (which is also JSON)
+                    if text and not text.strip().startswith('{'): 
+                         return text
+
+            # Fallback if loop finishes
+            if result_events and result_events[-1].content.parts:
+                 return result_events[-1].content.parts[0].text
             
-            if content.parts and content.parts[0].text:
-                return content.parts[0].text
-            else:
-                print("Error: Agent event was empty (content.parts is None or empty).")
-                return "An error occurred: The agent returned an empty response."
+            return "An error occurred: The agent returned an empty response."
             
         except Exception as e:
             print(f"Error parsing agent response: {e}")
             return f"An error occurred while parsing the agent's response: {e}"
 
     finally:
-        # Explicitly close the client connection
         if agent and hasattr(agent.model, "client"):
             await agent.model.client.close()
 
-# --- 4. Define Synchronous Wrapper ---
+# --- 5. Define Synchronous Wrapper ---
 def get_agent_response(prompt: str):
-    """
-    A synchronous wrapper to call the async function.
-    """
     try:
-        # Pass *only* the prompt
         return asyncio.run(get_agent_response_async(prompt))
     except Exception as e:
         print(f"Error running agent: {e}")
         return f"An error occurred while processing your request: {e}"
 
-# --- 5. Build the Streamlit Chat UI ---
+# --- 6. Build the Streamlit Chat UI ---
 st.title("USCIS Assistant 🤖")
 st.caption("I answer questions based *only* on the www.uscis.gov website.")
 
@@ -148,7 +175,6 @@ if prompt := st.chat_input("What is the I-90 form for?"):
 
     with st.chat_message("assistant"):
         with st.spinner("Searching www.uscis.gov..."):
-            
             response = get_agent_response(prompt)
             st.markdown(response)
     
