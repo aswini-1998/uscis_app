@@ -69,45 +69,47 @@ def create_agent():
     )
     return root_agent
     
-# --- 3. Define Async Helper Function ---
+# --- 3. Define Async Helper Function (With Resource Cleanup) ---
 async def get_agent_response_async(prompt: str):
     """
-    Creates a *fresh* agent and runner (stateless)
-    and runs the prompt.
+    Creates a *fresh* agent and runner (stateless), runs the prompt,
+    and ensures the client connection is closed to prevent warnings.
     """
     print("✅ Creating new *stateless* Agent and Runner in async context.")
     
-    # 1. Create a fresh agent *inside* this loop
-    agent = create_agent()
-
-    # 2. Create a fresh runner *inside* this loop
-    runner = InMemoryRunner(agent=agent)
-    
-    # 3. Run the *new* prompt
-    result_events = await runner.run_debug(prompt)
-    
-    # --- 4. THE FINAL PARSING FIX ---
-    # The last event is the one we want. Its .content is a complex
-    # object (not a string), and we must get the text from its 'parts'.
+    agent = None
     try:
-        # Get the last event (the agent's reply)
-        last_event = result_events[-1]
-        
-        # Access the content (which is a Content object)
-        content = last_event.content
-        
-        # Safely extract the text from the first part
-        if content.parts and content.parts[0].text:
-            return content.parts[0].text
-        else:
-            # This happens if the agent's reply is empty
-            print("Error: Agent event was empty (content.parts is None or empty).")
-            return "An error occurred: The agent returned an empty response."
-        
-    except Exception as e:
-        print(f"Error parsing agent response: {e}")
-        return f"An error occurred while parsing the agent's response: {e}"
+        # 1. Create a fresh agent *inside* this loop
+        agent = create_agent()
 
+        # 2. Create a fresh runner *inside* this loop
+        runner = InMemoryRunner(agent=agent)
+        
+        # 3. Run the *new* prompt
+        result_events = await runner.run_debug(prompt)
+        
+        # 4. Parse the response
+        try:
+            last_event = result_events[-1]
+            content = last_event.content
+            
+            if content.parts and content.parts[0].text:
+                return content.parts[0].text
+            else:
+                print("Error: Agent event was empty (content.parts is None or empty).")
+                return "An error occurred: The agent returned an empty response."
+            
+        except Exception as e:
+            print(f"Error parsing agent response: {e}")
+            return f"An error occurred while parsing the agent's response: {e}"
+
+    finally:
+        # --- FIX: Explicitly close the client connection ---
+        # This prevents the "Task was destroyed but it is pending" warnings
+        # by ensuring the AsyncClient is properly closed before we exit.
+        if agent and hasattr(agent.model, "client"):
+            await agent.model.client.close()
+            
 # --- 4. Define Synchronous Wrapper ---
 def get_agent_response(prompt: str):
     """
