@@ -3,7 +3,7 @@
 import os
 import streamlit as st
 import asyncio
-import requests  # New import for our custom tool
+import requests
 
 # --- ADK Imports ---
 from google.adk.agents import Agent
@@ -25,17 +25,17 @@ except (KeyError, FileNotFoundError):
     st.stop()
 
 # --- 2. Define Custom Tool (True Tool Grounding) ---
-# This function REPLACES the generic google_search.
-# It forces the restriction in CODE, so the agent cannot bypass it.
 def search_uscis(query: str) -> str:
     """
     Searches the official USCIS website (www.uscis.gov) for information.
     """
-    # FORCE the site restriction. The agent has no choice.
-    if "site:www.uscis.gov" not in query:
-        query = f"{query} site:www.uscis.gov"
+    # --- FIX: Relaxed filter (removed 'www') for better results ---
+    # We also put the 'site:' operator at the front, which is sometimes more reliable.
+    if "site:uscis.gov" not in query:
+        query = f"site:uscis.gov {query}"
     
-    # Use the Google Custom Search API directly
+    print(f"🔎 DEBUG: Tool running with query: '{query}'") # Debug print
+    
     try:
         api_key = os.environ["GOOGLE_API_KEY"]
         cse_id = os.environ["GOOGLE_CSE_ID"]
@@ -51,12 +51,15 @@ def search_uscis(query: str) -> str:
         data = response.json()
         
         items = data.get("items", [])
+        
+        print(f"🔎 DEBUG: Google Search returned {len(items)} results.") # Debug print
+        
         if not items:
             return "No results found on www.uscis.gov."
             
         # Format the results for the agent
         results_text = ""
-        for item in items[:5]:  # Limit to top 5 results
+        for item in items[:5]:
             results_text += f"Title: {item.get('title')}\n"
             results_text += f"Link: {item.get('link')}\n"
             results_text += f"Snippet: {item.get('snippet')}\n\n"
@@ -64,7 +67,9 @@ def search_uscis(query: str) -> str:
         return results_text
 
     except Exception as e:
-        return f"Error searching USCIS: {str(e)}"
+        error_msg = f"Error searching USCIS: {str(e)}"
+        print(f"❌ DEBUG: {error_msg}")
+        return error_msg
 
 # --- 3. Define the Agent ---
 def create_agent():
@@ -84,7 +89,6 @@ def create_agent():
             retry_options=retry_config
         ),
         description="An agent that answers immigration questions based *only* on www.uscis.gov.",
-        # Simplified instructions because the TOOL now handles the filtering
         instruction=(
             "You are a helpful assistant for US immigration questions. "
             "You MUST use the `search_uscis` tool to answer ALL user questions. "
@@ -102,7 +106,6 @@ def create_agent():
             "you MUST respond with the exact phrase: "
             "'Details not found in website 'www.uscis.gov', check other sources!'"
         ),
-        # We pass our CUSTOM tool here instead of the generic one
         tools=[search_uscis],
     )
     return root_agent
@@ -120,21 +123,17 @@ async def get_agent_response_async(prompt: str):
         agent = create_agent()
         runner = InMemoryRunner(agent=agent)
         
-        # We don't need to inject 'site:...' here anymore, the tool does it.
+        # We simply pass the prompt. The TOOL handles the filtering.
         result_events = await runner.run_debug(prompt)
         
-        # Parse the response
         try:
             # Find the last event that is from the model
             for event in reversed(result_events):
-                # We check if it has content (some events might be tool calls)
                 if hasattr(event, 'content') and event.content and event.content.parts:
                     text = event.content.parts[0].text
-                    # Basic check to ensure it's not a tool call request (which is also JSON)
                     if text and not text.strip().startswith('{'): 
                          return text
 
-            # Fallback if loop finishes
             if result_events and result_events[-1].content.parts:
                  return result_events[-1].content.parts[0].text
             

@@ -1,0 +1,4 @@
+# Ignore specific files
+Agent_Logic.txt
+Live_Web_URL.txt
+few-shot.py
