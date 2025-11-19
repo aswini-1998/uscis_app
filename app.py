@@ -42,11 +42,23 @@ def create_agent():
             retry_options=retry_config
         ),
         description="An agent that answers immigration questions based *only* on www.uscis.gov.",
+        # --- FIX: FEW-SHOT PROMPTING FOR TOOL GROUNDING ---
         instruction=(
             "You are a helpful assistant for US immigration questions. "
             "You MUST use the `Google Search` tool to answer ALL user questions. "
-            "The user's query will automatically include a 'site:' restriction. "
-            "Do not remove this restriction. "
+            
+            "**CRITICAL TOOL USAGE RULE:**"
+            "When calling `Google Search`, you **MUST** include the `site:www.uscis.gov` filter inside the query argument. "
+            "Do not rely on the user's prompt to have it. You must ensure it is there."
+            
+            "**EXAMPLES OF CORRECT TOOL USAGE:**"
+            "User: 'Green card'"
+            "✅ CORRECT Call: `Google Search(query='Green card site:www.uscis.gov')`"
+            "❌ INCORRECT Call: `Google Search(query='Green card')`"
+            
+            "User: 'H-1B cap'"
+            "✅ CORRECT Call: `Google Search(query='H-1B cap site:www.uscis.gov')`"
+            
             "Base your answer *strictly* and *only* on the snippets provided by the search tool. "
             "Do not use any outside knowledge. "
             "After providing the answer, you MUST cite all the sources you used. "
@@ -54,6 +66,7 @@ def create_agent():
             "\\nSources:"
             "\\n1. <full URL of the first source>"
             "\\n2. <full URL of the second source>"
+            
             "If the search results are empty, or if the snippets do not contain a clear answer, "
             "you MUST respond with the exact phrase: "
             "'Details not found in website 'www.uscis.gov', check other sources!'"
@@ -78,10 +91,7 @@ async def get_agent_response_async(prompt: str):
         # 2. Create a fresh runner
         runner = InMemoryRunner(agent=agent)
         
-        # --- THE FIX: SEARCH QUERY INJECTION ---
-        # We append the site restriction here. The model sees:
-        # "What is a green card? site:www.uscis.gov"
-        # This forces Google Search to ONLY return USCIS links.
+        # --- SEARCH QUERY INJECTION (Keep this as a safety net) ---
         restricted_prompt = f"{prompt} site:www.uscis.gov"
         
         # 3. Run the *restricted* prompt
